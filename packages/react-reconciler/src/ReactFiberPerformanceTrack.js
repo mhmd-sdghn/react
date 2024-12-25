@@ -9,9 +9,18 @@
 
 import type {Fiber} from './ReactInternalTypes';
 
+import type {Lanes} from './ReactFiberLane';
+
+import type {CapturedValue} from './ReactCapturedValue';
+
 import getComponentNameFromFiber from './getComponentNameFromFiber';
 
-import {getGroupNameOfHighestPriorityLane} from './ReactFiberLane';
+import {
+  getGroupNameOfHighestPriorityLane,
+  includesOnlyHydrationLanes,
+  includesOnlyOffscreenLanes,
+  includesOnlyHydrationOrOffscreenLanes,
+} from './ReactFiberLane';
 
 import {enableProfilerTimer} from 'shared/ReactFeatureFlags';
 
@@ -51,12 +60,12 @@ const reusableLaneOptions = {
   },
 };
 
-export function setCurrentTrackFromLanes(lanes: number): void {
+export function setCurrentTrackFromLanes(lanes: Lanes): void {
   reusableLaneDevToolDetails.track = getGroupNameOfHighestPriorityLane(lanes);
 }
 
 const blockingLaneMarker = {
-  startTime: 0,
+  startTime: 0.003,
   detail: {
     devtools: {
       color: 'primary-light',
@@ -67,7 +76,7 @@ const blockingLaneMarker = {
 };
 
 const transitionLaneMarker = {
-  startTime: 0,
+  startTime: 0.003,
   detail: {
     devtools: {
       color: 'primary-light',
@@ -78,7 +87,7 @@ const transitionLaneMarker = {
 };
 
 const suspenseLaneMarker = {
-  startTime: 0,
+  startTime: 0.003,
   detail: {
     devtools: {
       color: 'primary-light',
@@ -89,7 +98,7 @@ const suspenseLaneMarker = {
 };
 
 const idleLaneMarker = {
-  startTime: 0,
+  startTime: 0.003,
   detail: {
     devtools: {
       color: 'primary-light',
@@ -116,6 +125,7 @@ export function logComponentRender(
   fiber: Fiber,
   startTime: number,
   endTime: number,
+  wasHydrated: boolean,
 ): void {
   const name = getComponentNameFromFiber(fiber);
   if (name === null) {
@@ -131,15 +141,59 @@ export function logComponentRender(
     }
     reusableComponentDevToolDetails.color =
       selfTime < 0.5
-        ? 'primary-light'
+        ? wasHydrated
+          ? 'tertiary-light'
+          : 'primary-light'
         : selfTime < 10
-          ? 'primary'
+          ? wasHydrated
+            ? 'tertiary'
+            : 'primary'
           : selfTime < 100
-            ? 'primary-dark'
+            ? wasHydrated
+              ? 'tertiary-dark'
+              : 'primary-dark'
             : 'error';
     reusableComponentOptions.start = startTime;
     reusableComponentOptions.end = endTime;
     performance.measure(name, reusableComponentOptions);
+  }
+}
+
+export function logSuspenseBoundaryClientRendered(
+  fiber: Fiber,
+  startTime: number,
+  endTime: number,
+  errors: Array<CapturedValue<mixed>>,
+): void {
+  if (supportsUserTiming) {
+    const properties = [];
+    if (__DEV__) {
+      for (let i = 0; i < errors.length; i++) {
+        const capturedValue = errors[i];
+        const error = capturedValue.value;
+        const message =
+          typeof error === 'object' &&
+          error !== null &&
+          typeof error.message === 'string'
+            ? // eslint-disable-next-line react-internal/safe-string-coercion
+              String(error.message)
+            : // eslint-disable-next-line react-internal/safe-string-coercion
+              String(error);
+        properties.push(['Error', message]);
+      }
+    }
+    performance.measure('Suspense', {
+      start: startTime,
+      end: endTime,
+      detail: {
+        devtools: {
+          color: 'error',
+          track: COMPONENTS_TRACK,
+          tooltipText: 'Hydration failed',
+          properties,
+        },
+      },
+    });
   }
 }
 
@@ -223,6 +277,7 @@ export function logBlockingStart(
   eventType: null | string,
   eventIsRepeat: boolean,
   renderStartTime: number,
+  lanes: Lanes,
 ): void {
   if (supportsUserTiming) {
     reusableLaneDevToolDetails.track = 'Blocking';
@@ -240,7 +295,11 @@ export function logBlockingStart(
     }
     if (updateTime > 0) {
       // Log the time from when we called setState until we started rendering.
-      reusableLaneDevToolDetails.color = 'primary-light';
+      reusableLaneDevToolDetails.color = includesOnlyHydrationOrOffscreenLanes(
+        lanes,
+      )
+        ? 'tertiary-light'
+        : 'primary-light';
       reusableLaneOptions.start = updateTime;
       reusableLaneOptions.end = renderStartTime;
       performance.measure('Blocked', reusableLaneOptions);
@@ -292,33 +351,65 @@ export function logTransitionStart(
   }
 }
 
-export function logRenderPhase(startTime: number, endTime: number): void {
+export function logRenderPhase(
+  startTime: number,
+  endTime: number,
+  lanes: Lanes,
+): void {
   if (supportsUserTiming) {
-    reusableLaneDevToolDetails.color = 'primary-dark';
+    reusableLaneDevToolDetails.color = includesOnlyHydrationOrOffscreenLanes(
+      lanes,
+    )
+      ? 'tertiary-dark'
+      : 'primary-dark';
     reusableLaneOptions.start = startTime;
     reusableLaneOptions.end = endTime;
-    performance.measure('Render', reusableLaneOptions);
+    performance.measure(
+      includesOnlyOffscreenLanes(lanes)
+        ? 'Prepared'
+        : includesOnlyHydrationLanes(lanes)
+          ? 'Hydrated'
+          : 'Render',
+      reusableLaneOptions,
+    );
   }
 }
 
 export function logInterruptedRenderPhase(
   startTime: number,
   endTime: number,
+  lanes: Lanes,
 ): void {
   if (supportsUserTiming) {
-    reusableLaneDevToolDetails.color = 'primary-dark';
+    reusableLaneDevToolDetails.color = includesOnlyHydrationOrOffscreenLanes(
+      lanes,
+    )
+      ? 'tertiary-dark'
+      : 'primary-dark';
     reusableLaneOptions.start = startTime;
     reusableLaneOptions.end = endTime;
-    performance.measure('Interrupted Render', reusableLaneOptions);
+    performance.measure(
+      includesOnlyOffscreenLanes(lanes)
+        ? 'Prewarm'
+        : includesOnlyHydrationLanes(lanes)
+          ? 'Interrupted Hydration'
+          : 'Interrupted Render',
+      reusableLaneOptions,
+    );
   }
 }
 
 export function logSuspendedRenderPhase(
   startTime: number,
   endTime: number,
+  lanes: Lanes,
 ): void {
   if (supportsUserTiming) {
-    reusableLaneDevToolDetails.color = 'primary-dark';
+    reusableLaneDevToolDetails.color = includesOnlyHydrationOrOffscreenLanes(
+      lanes,
+    )
+      ? 'tertiary-dark'
+      : 'primary-dark';
     reusableLaneOptions.start = startTime;
     reusableLaneOptions.end = endTime;
     performance.measure('Prewarm', reusableLaneOptions);
@@ -328,25 +419,73 @@ export function logSuspendedRenderPhase(
 export function logSuspendedWithDelayPhase(
   startTime: number,
   endTime: number,
+  lanes: Lanes,
 ): void {
   // This means the render was suspended and cannot commit until it gets unblocked.
   if (supportsUserTiming) {
-    reusableLaneDevToolDetails.color = 'primary-dark';
+    reusableLaneDevToolDetails.color = includesOnlyHydrationOrOffscreenLanes(
+      lanes,
+    )
+      ? 'tertiary-dark'
+      : 'primary-dark';
     reusableLaneOptions.start = startTime;
     reusableLaneOptions.end = endTime;
     performance.measure('Suspended', reusableLaneOptions);
   }
 }
 
+export function logRecoveredRenderPhase(
+  startTime: number,
+  endTime: number,
+  lanes: Lanes,
+  recoverableErrors: Array<CapturedValue<mixed>>,
+  hydrationFailed: boolean,
+): void {
+  if (supportsUserTiming) {
+    const properties = [];
+    if (__DEV__) {
+      for (let i = 0; i < recoverableErrors.length; i++) {
+        const capturedValue = recoverableErrors[i];
+        const error = capturedValue.value;
+        const message =
+          typeof error === 'object' &&
+          error !== null &&
+          typeof error.message === 'string'
+            ? // eslint-disable-next-line react-internal/safe-string-coercion
+              String(error.message)
+            : // eslint-disable-next-line react-internal/safe-string-coercion
+              String(error);
+        properties.push(['Recoverable Error', message]);
+      }
+    }
+    performance.measure('Recovered', {
+      start: startTime,
+      end: endTime,
+      detail: {
+        devtools: {
+          color: 'primary-dark',
+          track: reusableLaneDevToolDetails.track,
+          trackGroup: LANES_TRACK_GROUP,
+          tooltipText: hydrationFailed
+            ? 'Hydration Failed'
+            : 'Recovered after Error',
+          properties,
+        },
+      },
+    });
+  }
+}
+
 export function logErroredRenderPhase(
   startTime: number,
   endTime: number,
+  lanes: Lanes,
 ): void {
   if (supportsUserTiming) {
     reusableLaneDevToolDetails.color = 'error';
     reusableLaneOptions.start = startTime;
     reusableLaneOptions.end = endTime;
-    performance.measure('Errored Render', reusableLaneOptions);
+    performance.measure('Errored', reusableLaneOptions);
   }
 }
 
